@@ -26,6 +26,7 @@ export class RedisService implements OnApplicationShutdown {
   constructor(config: ConfigService<AppConfig, true>) {
     this.client = new Redis(config.get('redis.url', { infer: true }), {
       maxRetriesPerRequest: 3,
+      family: 0, // resolve IPv4 and IPv6 (e.g. Railway's IPv6-only private network)
     });
     this.client.on('error', (err) =>
       this.logger.error(`Redis error: ${err.message}`),

@@ -24,6 +24,7 @@ import { AppConfig } from '../../config/configuration';
               : undefined,
             db: url.pathname.length > 1 ? Number(url.pathname.slice(1)) : 0,
             tls: url.protocol === 'rediss:' ? {} : undefined,
+            family: 0, // IPv4 + IPv6 (see RedisService)
           },
           defaultJobOptions: {
             removeOnComplete: { count: 1000 },
