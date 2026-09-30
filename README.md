@@ -7,29 +7,78 @@ QUEUED → RINGING → ANSWERED   → COMPLETED
                  ↘ UNANSWERED ↗
 ```
 
-The service keeps call state globally in Redis, enforces per-API-key **concurrency** and **calls-per-second** limits, and streams every state change over WebSockets. When a call completes, a background job uploads a recording to S3. Everything runs in Docker Compose.
+The service keeps call state globally in Redis, enforces per-API-key **concurrency** and **calls-per-second** limits, and streams every state change over WebSockets. When a call completes, a background job uploads a recording to S3. It's deployed live on Railway (see [Live demo](#live-demo)) and runs locally with Docker Compose.
 
-**Stack:** NestJS 11 (Node 22, TypeScript) · MySQL 8.4 (TypeORM) · Redis 7 · BullMQ · S3 / MinIO · `ws` · Prometheus + Grafana (optional)
+**Stack:** NestJS 11 (Node 22, TypeScript) · MySQL 8.4 (TypeORM) · Redis 7 · BullMQ · object storage (AWS S3 in production, configured through the `S3_*` variables; MinIO locally) · `ws` · Prometheus + Grafana (optional, local)
 
 ---
 
 ## Contents
 
-1. [Quick start](#quick-start)
-2. [Architecture](#architecture)
-3. [API reference](#api-reference)
-4. [WebSocket](#websocket)
-5. [Design decisions](#design-decisions)
-6. [Project structure](#project-structure)
-7. [Configuration](#configuration)
-8. [Testing](#testing)
-9. [Observability](#observability)
-10. [Using real AWS S3](#using-real-aws-s3)
-11. [Trade-offs and future work](#trade-offs-and-future-work)
+1. [Live demo](#live-demo)
+2. [Run locally with Docker](#run-locally-with-docker)
+3. [Architecture](#architecture)
+4. [API reference](#api-reference)
+5. [WebSocket](#websocket)
+6. [Design decisions](#design-decisions)
+7. [Project structure](#project-structure)
+8. [Configuration](#configuration)
+9. [Testing](#testing)
+10. [Observability](#observability)
+11. [Using real AWS S3](#using-real-aws-s3)
+12. [Trade-offs and future work](#trade-offs-and-future-work)
 
 ---
 
-## Quick start
+## Live demo
+
+The service is deployed and usable at:
+
+**`https://api-production-82563.up.railway.app`**
+
+- Health check (no key needed): [https://api-production-82563.up.railway.app/health](https://api-production-82563.up.railway.app/health)
+- WebSocket URLs use `wss://`. Always connect with the `ws_url` returned by `POST /calls`.
+- The deployment runs the `api` and `worker` services on Railway, with managed MySQL and Redis.
+- Recordings go to a **private AWS S3 bucket**: one silent mock MP3 is uploaded per completed call, and clients download it through a short-lived signed link.
+
+> **API keys:** every request except `/health` needs `Authorization: Bearer <your API key>`. Production keys aren't published here; they are shared separately with the submission.
+
+### Try it
+
+```bash
+export API=https://api-production-82563.up.railway.app
+export KEY='<your API key>'
+
+# 1. Start a call
+curl -s $API/calls -X POST \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"from":"+14155550100","to":"+14155550101","metadata":{"order_id":42}}'
+# → {"call_id":"…","status":"QUEUED","ws_url":"wss://api-production-82563.up.railway.app/ws/calls/…?token=…","ws_token_expires_at":"…"}
+
+# 2. Watch it live: paste the ws_url from step 1 exactly as returned
+npx wscat -c '<ws_url>'
+
+# 3. Poll it, see its full timeline
+curl -s $API/calls/<call_id>        -H "Authorization: Bearer $KEY"
+curl -s $API/calls/<call_id>/events -H "Authorization: Bearer $KEY"
+
+# 4. After it completes, download the recording through its signed URL
+curl -s -o recording.mp3 "$(curl -s $API/calls/<call_id> -H "Authorization: Bearer $KEY" \
+  | python3 -c 'import sys,json;print(json.load(sys.stdin)["recording"]["url"])')"
+
+# 5. Platform metrics
+curl -s $API/metrics -H "Authorization: Bearer $KEY"
+```
+
+Every call lasts at least 30 seconds (answered: 33–49 s, unanswered: 30–41 s), which leaves time to connect to the WebSocket. For a single command that creates a call and connects to it straight away, see [End-to-end test on production](#end-to-end-test-on-production).
+
+Quoting tips:
+- Keep `$API` and `$KEY` inside **double** quotes or unquoted. Inside single quotes the shell doesn't expand them.
+- Don't build the WebSocket URL from `$API` (that gives `ws:/https://…`). Use the returned `ws_url`, which already has the right `wss://` scheme and token.
+
+---
+
+## Run locally with Docker
 
 **Prerequisite:** Docker with Compose v2.
 
@@ -37,40 +86,25 @@ The service keeps call state globally in Redis, enforces per-API-key **concurren
 docker compose up --build
 ```
 
-This starts `mysql`, `redis` and `minio`, runs the one-shot `migrate` service (migrations plus seed keys), and then starts `api` on http://localhost:3000 and the `worker`.
+This starts `mysql`, `redis` and `minio`, runs the one-shot `migrate` service (migrations plus seed keys), and then starts `api` on http://localhost:3000 and the `worker`. Locally, recordings go to MinIO instead of AWS S3.
 
-Two development API keys are seeded:
+Two development API keys are seeded. They are for **local use only** and don't work on the live deployment:
 
 | Key | Role |
 |---|---|
 | `dev_client_key_change_me` | client |
 | `dev_admin_key_change_me`  | admin |
 
-> **Change these before deploying.** Set `SEED_ADMIN_API_KEY` / `SEED_CLIENT_API_KEY` in `.env`, or leave them empty to have random keys generated and printed once in the `migrate` logs.
+> Production uses its own randomly generated keys. For any other deployment, set `SEED_ADMIN_API_KEY` / `SEED_CLIENT_API_KEY` to your own values, or leave them unset to have random keys generated and printed once in the `migrate` logs.
 
-### Try it
+The commands from [Try it](#try-it) work locally too, with:
 
 ```bash
+export API=http://localhost:3000
 export KEY=dev_client_key_change_me
-
-# 1. Start a call
-curl -s localhost:3000/calls -X POST \
-  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
-  -d '{"from":"+14155550100","to":"+14155550101","metadata":{"order_id":42}}'
-# → {"call_id":"…","status":"QUEUED","ws_url":"ws://localhost:3000/ws/calls/…?token=…","ws_token_expires_at":"…"}
-
-# 2. Watch it live (paste the ws_url)
-npx wscat -c 'ws://localhost:3000/ws/calls/<call_id>?token=<token>'
-
-# 3. Poll it, see its full timeline
-curl -s localhost:3000/calls/<call_id>        -H "Authorization: Bearer $KEY"
-curl -s localhost:3000/calls/<call_id>/events -H "Authorization: Bearer $KEY"
-
-# 4. Platform metrics
-curl -s localhost:3000/metrics -H "Authorization: Bearer $KEY"
 ```
 
-With the default timings every call lasts at least 30 seconds (answered: 33–49 s, unanswered: 30–41 s), which leaves plenty of time to connect to the WebSocket. Shortly after the call completes, `GET /calls/:id` returns `recording.url`, a signed link that downloads the uploaded MP3. The MinIO console is at http://localhost:9001 (user and password: `minioadmin`).
+Locally the `ws_url` starts with `ws://localhost:3000`, and the signed recording URL points at MinIO (`http://localhost:9000`). The MinIO console is at http://localhost:9001 (user and password: `minioadmin`).
 
 ### Running outside Docker (for development)
 
@@ -159,7 +193,7 @@ Response (`201`):
 {
   "call_id": "703e94fd-fb35-46fa-bfc0-fba13923fee3",
   "status": "QUEUED",
-  "ws_url": "ws://localhost:3000/ws/calls/703e94fd-…?token=5GQ8mC…",
+  "ws_url": "wss://api-production-82563.up.railway.app/ws/calls/703e94fd-…?token=5GQ8mC…",
   "ws_token_expires_at": "2026-09-30T09:34:02.248Z"
 }
 ```
@@ -184,14 +218,14 @@ Response (`201`):
   },
   "recording": {
     "status": "UPLOADED",
-    "url": "http://localhost:9000/recordings/recordings/703e….mp3?X-Amz-Signature=…",
+    "url": "https://<bucket>.s3.<region>.amazonaws.com/recordings/703e….mp3?X-Amz-Signature=…",
     "url_expires_at": "2026-09-30T09:34:26.122Z"
   },
   "last_event_sequence": 5
 }
 ```
 
-`recording` is `null` until the call completes. After that its `status` is `PENDING`, then `UPLOADED` or `FAILED`. As the spec requires, every completed call gets a recording, including unanswered ones. See [Recordings for unanswered calls](#recordings-for-unanswered-calls-spec-interpretation) for the more realistic alternative and how to switch to it. The bucket is private, and `url` is a presigned link that expires after 1 hour by default.
+`recording` is `null` until the call completes. After that its `status` is `PENDING`, then `UPLOADED` or `FAILED`. As the spec requires, every completed call gets a recording, including unanswered ones. See [Recordings for unanswered calls](#recordings-for-unanswered-calls-spec-interpretation) for the more realistic alternative and how to switch to it. The bucket is private, and `url` is a presigned link that expires after 1 hour by default. The file is a few seconds of silent MP3 (the same mock recording for every call).
 
 ### `GET /calls/:id/events`
 
@@ -231,9 +265,9 @@ Event types:
 ### Admin example
 
 ```bash
-export ADMIN=dev_admin_key_change_me
-curl -s localhost:3000/admin/api-keys -X POST \
-  -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json' \
+export ADMIN_KEY='<your admin API key>'
+curl -s $API/admin/api-keys -X POST \
+  -H "Authorization: Bearer $ADMIN_KEY" -H 'Content-Type: application/json' \
   -d '{"name":"acme","max_concurrent_calls":10,"max_cps":5}'
 # → {..., "api_key":"mcs_YfxkZ4NQ…"}   ← shown once; only its SHA-256 hash is stored
 ```
@@ -245,8 +279,10 @@ curl -s localhost:3000/admin/api-keys -X POST \
 Connect to the `ws_url` from `POST /calls`:
 
 ```
-ws://localhost:3000/ws/calls/<call_id>?token=<ws_token>
+wss://api-production-82563.up.railway.app/ws/calls/<call_id>?token=<ws_token>
 ```
+
+Locally the same path is served over `ws://localhost:3000`.
 
 Messages from the server:
 
@@ -446,7 +482,7 @@ Every variable is validated at startup with Joi, and the app refuses to start on
 | `CALL_STATE_TTL_SECONDS` | `3600` | How long finished calls stay in Redis |
 | `WS_TOKEN_TTL_SECONDS` / `_GRACE_SECONDS` | `3600` / `300` | WebSocket token lifetime, and how long it stays valid after completion |
 | `RECORDING_UPLOAD_ATTEMPTS` | `5` | Upload retries (exponential backoff) |
-| `S3_*` | MinIO | See [Using real AWS S3](#using-real-aws-s3) |
+| `S3_*` | MinIO (local) | Production uses AWS S3 through these variables: bucket, region, access keys, empty endpoints. See [Using real AWS S3](#using-real-aws-s3) |
 | `PUBLIC_BASE_URL` | request host | Base used to build `ws_url` |
 
 ---
@@ -454,7 +490,7 @@ Every variable is validated at startup with Joi, and the app refuses to start on
 ## Testing
 
 ```bash
-pnpm test                               # 105 unit tests — every service, processor, guard and gateway handshake
+pnpm test                               # 108 unit tests — every service, processor, guard, gateway handshake and config
 docker compose up -d redis && pnpm test:e2e   # Lua scripts against a real Redis
 pnpm lint
 ```
@@ -465,7 +501,33 @@ The integration suite proves the concurrency guarantees against a real Redis:
 - Of 20 racing duplicate transitions, exactly one applies.
 - A stale job can't move a call backwards.
 
-### Load test (single API container, laptop)
+### End-to-end test on production
+
+One command creates a call and immediately opens its WebSocket, so you watch the whole lifecycle live:
+
+```bash
+export API=https://api-production-82563.up.railway.app
+export KEY='<your API key>'
+npx wscat -c "$(curl -s $API/calls -X POST -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' -d '{"from":"+14155550100","to":"+14155550101","metadata":{"order":42}}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["ws_url"])')"
+```
+
+Expected output over the next 30–50 seconds:
+
+```
+Connected (press CTRL+C to quit)
+< {"type":"snapshot","call":{…"status":"QUEUED"…}}
+< {"type":"event","event":{"sequence":2,"type":"STATUS_CHANGED","from_status":"QUEUED","to_status":"RINGING",…}}
+< {"type":"event","event":{"sequence":3,"type":"STATUS_CHANGED","from_status":"RINGING","to_status":"ANSWERED",…}}
+< {"type":"event","event":{"sequence":4,"type":"STATUS_CHANGED","from_status":"ANSWERED","to_status":"COMPLETED",…}}
+< {"type":"event","event":{"sequence":5,"type":"RECORDING_UPLOAD_SUCCEEDED","payload":{"attempt":1,"recording_key":"recordings/….mp3"},…}}
+Disconnected (code: 1000, reason: "Call finished")
+```
+
+About half the calls go `RINGING → UNANSWERED → COMPLETED` instead. If you get `Invalid API key` or an empty URL, check that `KEY` is set in the current terminal. Creating more than 2 calls per second, or having more than 3 active at once, returns `429 {"error":"Rate limit exceeded"}` by design.
+
+The same command works against the local stack with `API=http://localhost:3000` and `KEY=dev_client_key_change_me`.
+
+### Load test (single API container, laptop, local Docker)
 
 3,000 `POST /calls` requests at 50 concurrent connections, using a key with raised limits:
 
@@ -478,6 +540,8 @@ The worker took all 3,000 calls through their full lifecycle and recording uploa
 ---
 
 ## Observability
+
+Prometheus and Grafana run with the local Docker stack; they aren't part of the live deployment. The live API still serves `/metrics` (JSON) and `/metrics/prometheus` (admin key).
 
 ```bash
 docker compose --profile observability up --build
@@ -492,11 +556,11 @@ Both are free, open-source images; no account is needed.
 
 ## Using real AWS S3
 
-Create a `.env` next to `docker-compose.yml`:
+The live deployment stores recordings this way, with the variables below set in the hosting platform. To use S3 locally too, create a `.env` next to `docker-compose.yml`:
 
 ```dotenv
 S3_BUCKET=your-bucket
-S3_REGION=ap-south-1
+S3_REGION=ap-southeast-2
 S3_ENDPOINT=                # empty → AWS
 S3_PUBLIC_ENDPOINT=         # empty → AWS
 S3_FORCE_PATH_STYLE=false
@@ -505,6 +569,7 @@ S3_SECRET_ACCESS_KEY=…
 ```
 
 - Keep the bucket **private**. Clients only ever get presigned URLs.
+- `S3_REGION` must be the bucket's actual region; a mismatch fails uploads with *"The bucket you are attempting to access must be addressed using the specified endpoint"*.
 - Use a dedicated IAM user whose policy allows only `s3:PutObject` and `s3:GetObject` on `arn:aws:s3:::your-bucket/recordings/*`.
 - `.env` is gitignored. Never commit keys.
 
