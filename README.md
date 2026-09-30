@@ -192,7 +192,7 @@ Response (`201`):
 }
 ```
 
-`recording` is `null` until the call completes. After that its `status` is `PENDING`, then `UPLOADED` or `FAILED`. The bucket is private, and `url` is a presigned link that expires after 1 hour by default.
+`recording` is `null` until the call completes. After that its `status` is `PENDING`, then `UPLOADED` or `FAILED`. As the spec requires, every completed call gets a recording, including unanswered ones. See [Recordings for unanswered calls](#recordings-for-unanswered-calls-spec-interpretation) for the more realistic alternative and how to switch to it. The bucket is private, and `url` is a presigned link that expires after 1 hour by default.
 
 ### `GET /calls/:id/events`
 
@@ -313,6 +313,53 @@ The spec asks for live state in Redis with periodic persistence. Every 5 seconds
 Reads:
 - `GET /calls/:id` reads Redis first and falls back to MySQL after `CALL_STATE_TTL_SECONDS`.
 - `/events` reads the call's Redis event list, which is complete while the call is hot, so it doesn't lag behind the flush.
+
+### Recordings for unanswered calls: spec interpretation
+
+**Current behaviour, which follows the spec literally.** The spec says: *"When a call reaches COMPLETED, trigger a background job that uploads a static mock audio file"*. This service does exactly that for **every** completed call, including calls that went `UNANSWERED → COMPLETED`, so an unanswered call ends up with an uploaded recording.
+
+**Ideal behaviour.** On a real telephony platform an unanswered call has no audio, so there is nothing to record. Only answered calls should get a recording:
+
+| Outcome | Upload job | `recording` in `GET /calls/:id` | WebSocket closes after |
+|---|---|---|---|
+| ANSWERED → COMPLETED | queued | `PENDING` → `UPLOADED` / `FAILED` | `RECORDING_UPLOAD_SUCCEEDED` (or the final `RECORDING_UPLOAD_FAILED`) |
+| UNANSWERED → COMPLETED | **not queued** | `null` | the `COMPLETED` event |
+
+**What to change to get the ideal behaviour.** It's a small, contained change, because every completion follow-up lives in one place (`CallLifecycleService`):
+
+1. **`src/modules/call-lifecycle/call-lifecycle.service.ts`, in `transition()`.** Mark the recording as pending only for answered calls. `from` is the outcome on the way into COMPLETED:
+   ```ts
+   const isFinal = to === CallStatus.COMPLETED;
+   const hasRecording = isFinal && from === CallStatus.ANSWERED;
+   const result = await this.callState.transition(callId, from, to, {
+     fields: hasRecording ? { recording_status: RecordingStatus.PENDING } : {},
+   });
+   ```
+2. **Same file, `onCompleted()`.** Queue the upload only for answered calls. The other follow-ups (release the rate-limit slot, shorten WebSocket tokens) still run for every call:
+   ```ts
+   await Promise.all([
+     this.rateLimiter.release(call.apiKeyId, call.id),
+     this.callUpdates.expireTokensForCall(call.id),
+     ...(call.outcome === CallStatus.ANSWERED
+       ? [this.recordings.enqueueUpload(call.id)]
+       : []),
+   ]);
+   ```
+3. **`src/modules/call-updates/call-updates.gateway.ts`, in `dispatch()`.** Close the socket on `COMPLETED` for unanswered calls, since no recording event will follow. `CallStatus` needs importing there:
+   ```ts
+   const isLast =
+     event.type === CallEventType.RECORDING_UPLOAD_SUCCEEDED ||
+     (event.type === CallEventType.RECORDING_UPLOAD_FAILED &&
+       event.payload?.final === true) ||
+     (event.toStatus === CallStatus.COMPLETED &&
+       event.fromStatus === CallStatus.UNANSWERED);
+   ```
+4. **Tests, in `call-lifecycle.service.spec.ts`.** Add a case asserting that `UNANSWERED → COMPLETED` does **not** call `enqueueUpload` and does not set `recording_status`, while still releasing the slot. Update the existing COMPLETED case to use the ANSWERED path.
+
+Nothing else needs to change:
+- **Database:** `recording_status` is already nullable, so unanswered calls keep `NULL`.
+- **API:** `GET /calls/:id` already returns `recording: null` when there is no recording status.
+- **Metrics:** after the change, `uploads.succeeded` should match `completed_calls.answered`.
 
 ### Swappable providers
 
@@ -542,6 +589,7 @@ A few details:
 - **Redis is the live source of truth.** AOF persistence is on, and MySQL receives every event within about 5 seconds. A total Redis loss would lose at most that window plus the state of in-flight calls. For stronger durability, run Redis with replication, or write `CALL_CREATED` synchronously at the cost of hot-path latency.
 - **Single Redis primary.** The rate-limit script is Cluster-safe (hash-tagged keys). The call script touches global keys (stream, active set), so Redis Cluster would need those sharded per slot.
 - **The event stream is capped** (`EVENT_STREAM_MAX_LENGTH`, default 1M) as a memory guard. That cap only matters if MySQL is down long enough for 1M events to back up.
+- **Recordings on unanswered calls.** These are uploaded to match the spec's wording; realistically only answered calls should have one. See [Recordings for unanswered calls](#recordings-for-unanswered-calls-spec-interpretation) for the four-step change.
 - **Possible next steps:**
   - webhooks to client URLs on state change
   - OpenAPI/Swagger docs
