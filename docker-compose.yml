@@ -37,6 +37,11 @@ x-app: &app
   image: mock-comms-service:local
   pull_policy: never
   restart: unless-stopped
+  # Optional .env supplies app settings not listed above (e.g. MOCK_* timings);
+  # values in `environment` always win, so Docker networking stays correct.
+  env_file:
+    - path: .env
+      required: false
   environment: *app-env
 
 services:

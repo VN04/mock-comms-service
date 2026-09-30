@@ -6,7 +6,7 @@ import { CallRecord } from '../../../common/call/call-record';
 import { CallStatus } from '../../../common/call/call-status';
 import { Queues } from '../../../common/constants/queues';
 import { randomInt } from '../../../common/utils/random';
-import { AppConfig } from '../../../config/configuration';
+import { AppConfig, DelayRange } from '../../../config/configuration';
 import { CallProvider } from '../call-provider.interface';
 
 export interface MockStepJobData {
@@ -59,33 +59,26 @@ export class MockCallProvider implements CallProvider {
 
   /** Picks the next state and how long until it happens. */
   planNextStep(current: CallStatus): PlannedStep | null {
-    const {
-      stepDelayMinMs,
-      stepDelayMaxMs,
-      talkDurationMinMs,
-      talkDurationMaxMs,
-    } = this.cfg;
-    const step = () => randomInt(stepDelayMinMs, stepDelayMaxMs);
+    const { queuedDelayMs, ringingDelayMs, talkDurationMs, unansweredDelayMs } =
+      this.cfg;
+    const wait = ({ min, max }: DelayRange) => randomInt(min, max);
 
     switch (current) {
       case CallStatus.QUEUED:
-        return { to: CallStatus.RINGING, delayMs: step() };
+        return { to: CallStatus.RINGING, delayMs: wait(queuedDelayMs) };
       case CallStatus.RINGING:
         return {
           to:
             Math.random() < this.cfg.answerProbability
               ? CallStatus.ANSWERED
               : CallStatus.UNANSWERED,
-          delayMs: step(),
+          delayMs: wait(ringingDelayMs),
         };
       case CallStatus.ANSWERED:
         // An answered call "talks" for a while before hanging up.
-        return {
-          to: CallStatus.COMPLETED,
-          delayMs: randomInt(talkDurationMinMs, talkDurationMaxMs),
-        };
+        return { to: CallStatus.COMPLETED, delayMs: wait(talkDurationMs) };
       case CallStatus.UNANSWERED:
-        return { to: CallStatus.COMPLETED, delayMs: step() };
+        return { to: CallStatus.COMPLETED, delayMs: wait(unansweredDelayMs) };
       case CallStatus.COMPLETED:
         return null;
     }

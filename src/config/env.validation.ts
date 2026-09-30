@@ -4,6 +4,17 @@ import * as Joi from 'joi';
  * Validates environment variables at boot. The app refuses to start with a
  * missing/invalid value instead of failing later at runtime.
  */
+/** `<PREFIX>_MIN_MS` / `<PREFIX>_MAX_MS` pair, where MAX must be >= MIN. */
+function delayRange(prefix: string, min: number, max: number) {
+  return {
+    [`${prefix}_MIN_MS`]: Joi.number().integer().min(0).default(min),
+    [`${prefix}_MAX_MS`]: Joi.number()
+      .integer()
+      .min(Joi.ref(`${prefix}_MIN_MS`))
+      .default(max),
+  };
+}
+
 // `.empty('')` treats blank values as unset, so e.g. `S3_ENDPOINT=` switches
 // storage from MinIO to real AWS S3.
 export const envValidationSchema = Joi.object({
@@ -36,10 +47,12 @@ export const envValidationSchema = Joi.object({
   RECORDING_UPLOAD_ATTEMPTS: Joi.number().integer().min(1).default(5),
 
   CALL_PROVIDER: Joi.string().valid('mock').default('mock'),
-  MOCK_STEP_DELAY_MIN_MS: Joi.number().integer().min(0).default(1000),
-  MOCK_STEP_DELAY_MAX_MS: Joi.number().integer().min(0).default(3000),
-  MOCK_TALK_DURATION_MIN_MS: Joi.number().integer().min(0).default(3000),
-  MOCK_TALK_DURATION_MAX_MS: Joi.number().integer().min(0).default(8000),
+  // Per-state delay ranges of the mock provider. Defaults keep every call
+  // alive for at least 30s (answered: 33-49s, unanswered: 30-41s).
+  ...delayRange('MOCK_QUEUED_DELAY', 5000, 7000),
+  ...delayRange('MOCK_RINGING_DELAY', 8000, 12000),
+  ...delayRange('MOCK_TALK_DURATION', 20000, 30000),
+  ...delayRange('MOCK_UNANSWERED_DELAY', 17000, 22000),
   MOCK_ANSWER_PROBABILITY: Joi.number().min(0).max(1).default(0.5),
 
   RATE_LIMIT_DEFAULT_MAX_CONCURRENT: Joi.number().integer().min(1).default(3),

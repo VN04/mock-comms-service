@@ -11,10 +11,10 @@ describe('MockCallProvider', () => {
       mockConfig({
         callProvider: {
           mock: {
-            stepDelayMinMs: 100,
-            stepDelayMaxMs: 200,
-            talkDurationMinMs: 1000,
-            talkDurationMaxMs: 2000,
+            queuedDelayMs: { min: 100, max: 200 },
+            ringingDelayMs: { min: 300, max: 400 },
+            talkDurationMs: { min: 1000, max: 2000 },
+            unansweredDelayMs: { min: 500, max: 600 },
             answerProbability,
           },
         },
@@ -38,9 +38,10 @@ describe('MockCallProvider', () => {
   });
 
   it('branches RINGING → ANSWERED or UNANSWERED by probability', () => {
-    expect(build(1).planNextStep(CallStatus.RINGING)?.to).toBe(
-      CallStatus.ANSWERED,
-    );
+    const step = build(1).planNextStep(CallStatus.RINGING);
+    expect(step?.to).toBe(CallStatus.ANSWERED);
+    expect(step?.delayMs).toBeGreaterThanOrEqual(300);
+    expect(step?.delayMs).toBeLessThanOrEqual(400);
     expect(build(0).planNextStep(CallStatus.RINGING)?.to).toBe(
       CallStatus.UNANSWERED,
     );
@@ -55,9 +56,10 @@ describe('MockCallProvider', () => {
 
   it('completes unanswered calls and stops after COMPLETED', async () => {
     const provider = build(0.5);
-    expect(provider.planNextStep(CallStatus.UNANSWERED)?.to).toBe(
-      CallStatus.COMPLETED,
-    );
+    const step = provider.planNextStep(CallStatus.UNANSWERED);
+    expect(step?.to).toBe(CallStatus.COMPLETED);
+    expect(step?.delayMs).toBeGreaterThanOrEqual(500);
+    expect(step?.delayMs).toBeLessThanOrEqual(600);
     expect(provider.planNextStep(CallStatus.COMPLETED)).toBeNull();
 
     await provider.scheduleNextStep('c1', CallStatus.COMPLETED);

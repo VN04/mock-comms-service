@@ -1,5 +1,11 @@
 import { ValidatedEnv, validateEnv } from './env.validation';
 
+/** Inclusive range in milliseconds. */
+export interface DelayRange {
+  min: number;
+  max: number;
+}
+
 /**
  * Typed configuration tree built from (already validated) env vars.
  * Consumers inject `ConfigService<AppConfig, true>` and read e.g.
@@ -31,10 +37,14 @@ export interface AppConfig {
   callProvider: {
     driver: 'mock';
     mock: {
-      stepDelayMinMs: number;
-      stepDelayMaxMs: number;
-      talkDurationMinMs: number;
-      talkDurationMaxMs: number;
+      /** QUEUED → RINGING */
+      queuedDelayMs: DelayRange;
+      /** RINGING → ANSWERED | UNANSWERED */
+      ringingDelayMs: DelayRange;
+      /** ANSWERED → COMPLETED (talk time) */
+      talkDurationMs: DelayRange;
+      /** UNANSWERED → COMPLETED */
+      unansweredDelayMs: DelayRange;
       answerProbability: number;
     };
   };
@@ -87,10 +97,10 @@ export function buildConfig(env: ValidatedEnv): AppConfig {
     callProvider: {
       driver: env.CALL_PROVIDER,
       mock: {
-        stepDelayMinMs: env.MOCK_STEP_DELAY_MIN_MS,
-        stepDelayMaxMs: env.MOCK_STEP_DELAY_MAX_MS,
-        talkDurationMinMs: env.MOCK_TALK_DURATION_MIN_MS,
-        talkDurationMaxMs: env.MOCK_TALK_DURATION_MAX_MS,
+        queuedDelayMs: range(env, 'MOCK_QUEUED_DELAY'),
+        ringingDelayMs: range(env, 'MOCK_RINGING_DELAY'),
+        talkDurationMs: range(env, 'MOCK_TALK_DURATION'),
+        unansweredDelayMs: range(env, 'MOCK_UNANSWERED_DELAY'),
         answerProbability: env.MOCK_ANSWER_PROBABILITY,
       },
     },
@@ -116,6 +126,10 @@ export function buildConfig(env: ValidatedEnv): AppConfig {
   };
 }
 
+const range = (env: ValidatedEnv, prefix: string): DelayRange => ({
+  min: env[`${prefix}_MIN_MS`],
+  max: env[`${prefix}_MAX_MS`],
+});
 /* eslint-enable @typescript-eslint/no-unsafe-assignment */
 
 /** Nest `ConfigModule` loader: validate once, then build the typed tree. */

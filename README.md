@@ -71,7 +71,7 @@ curl -s localhost:3000/calls/<call_id>/events -H "Authorization: Bearer $KEY"
 curl -s localhost:3000/metrics -H "Authorization: Bearer $KEY"
 ```
 
-About 10–15 seconds after the call completes, `GET /calls/:id` returns `recording.url`, a signed link that downloads the uploaded MP3. The MinIO console is at http://localhost:9001 (user and password: `minioadmin`).
+With the default timings every call lasts at least 30 seconds (answered: 33–49 s, unanswered: 30–41 s), which leaves plenty of time to connect to the WebSocket. Shortly after the call completes, `GET /calls/:id` returns `recording.url`, a signed link that downloads the uploaded MP3. The MinIO console is at http://localhost:9001 (user and password: `minioadmin`).
 
 ### Running outside Docker (for development)
 
@@ -391,8 +391,10 @@ Every variable is validated at startup with Joi, and the app refuses to start on
 | Variable | Default | Purpose |
 |---|---|---|
 | `RATE_LIMIT_DEFAULT_MAX_CONCURRENT` / `_MAX_CPS` | `3` / `2` | Defaults for keys without an override |
-| `MOCK_STEP_DELAY_MIN_MS` / `_MAX_MS` | `1000` / `3000` | Delay between simulated steps |
-| `MOCK_TALK_DURATION_MIN_MS` / `_MAX_MS` | `3000` / `8000` | How long answered calls last |
+| `MOCK_QUEUED_DELAY_MIN_MS` / `_MAX_MS` | `5000` / `7000` | QUEUED → RINGING |
+| `MOCK_RINGING_DELAY_MIN_MS` / `_MAX_MS` | `8000` / `12000` | RINGING → ANSWERED / UNANSWERED |
+| `MOCK_TALK_DURATION_MIN_MS` / `_MAX_MS` | `20000` / `30000` | ANSWERED → COMPLETED (talk time) |
+| `MOCK_UNANSWERED_DELAY_MIN_MS` / `_MAX_MS` | `17000` / `22000` | UNANSWERED → COMPLETED |
 | `MOCK_ANSWER_PROBABILITY` | `0.5` | Chance a call is answered |
 | `PERSISTENCE_FLUSH_INTERVAL_MS` | `5000` | Redis → MySQL flush period |
 | `CALL_STATE_TTL_SECONDS` | `3600` | How long finished calls stay in Redis |
