@@ -25,8 +25,7 @@ The service keeps call state globally in Redis, enforces per-API-key **concurren
 8. [Testing](#testing)
 9. [Observability](#observability)
 10. [Using real AWS S3](#using-real-aws-s3)
-11. [Deploying to Railway](#deploying-to-railway)
-12. [Trade-offs and future work](#trade-offs-and-future-work)
+11. [Trade-offs and future work](#trade-offs-and-future-work)
 
 ---
 
@@ -508,79 +507,6 @@ S3_SECRET_ACCESS_KEY=…
 - Keep the bucket **private**. Clients only ever get presigned URLs.
 - Use a dedicated IAM user whose policy allows only `s3:PutObject` and `s3:GetObject` on `arn:aws:s3:::your-bucket/recordings/*`.
 - `.env` is gitignored. Never commit keys.
-
----
-
-## Deploying to Railway
-
-Railway runs the same Dockerfile as two services, `api` and `worker`, next to managed MySQL and Redis. Recordings go to your AWS S3 bucket, since there's no MinIO on Railway.
-
-> Vercel isn't suitable here. Its serverless functions can't hold WebSocket connections or run the always-on BullMQ worker.
-
-### 1. Push the code to GitHub
-
-```bash
-git remote add origin https://github.com/<you>/mock-comms-service.git
-git push -u origin feat/mock-comms-service   # or merge into main first and push main
-```
-
-### 2. Create the project and databases
-
-1. Go to https://railway.com and create a **New Project**, then choose **Deploy from GitHub repo** and pick this repo. Railway detects the `Dockerfile` and creates a service. Rename it to **`api`**.
-2. In the project canvas, click **+ Create → Database → MySQL**.
-3. Click **+ Create → Database → Redis**.
-
-### 3. Configure the `api` service
-
-1. **Settings → Deploy:**
-   - **Custom Start Command:** `node dist/main.js`
-   - **Pre-deploy Command:** `node dist/infrastructure/database/scripts/bootstrap-db.js` (runs migrations and seeds keys before each deploy)
-   - **Healthcheck Path:** `/health`
-2. **Settings → Networking:** click **Generate Domain** and choose port `3000`.
-3. **Variables → Raw Editor.** Paste the following, then fill in your S3 details. The `${{…}}` references resolve to the MySQL and Redis services automatically.
-
-```dotenv
-NODE_ENV=production
-PUBLIC_BASE_URL=https://${{RAILWAY_PUBLIC_DOMAIN}}
-DB_HOST=${{MySQL.MYSQLHOST}}
-DB_PORT=${{MySQL.MYSQLPORT}}
-DB_USER=${{MySQL.MYSQLUSER}}
-DB_PASSWORD=${{MySQL.MYSQLPASSWORD}}
-DB_NAME=${{MySQL.MYSQLDATABASE}}
-REDIS_URL=${{Redis.REDIS_URL}}
-S3_BUCKET=your-bucket
-S3_REGION=ap-south-1
-S3_FORCE_PATH_STYLE=false
-S3_ACCESS_KEY_ID=AKIA...
-S3_SECRET_ACCESS_KEY=...
-# Leave the seed keys unset: random keys are generated and printed ONCE in the
-# first deploy's pre-deploy logs. Copy them somewhere safe.
-```
-
-### 4. Add the `worker` service
-
-1. **+ Create → GitHub Repo**, pick the same repo, and rename the new service to **`worker`**.
-2. **Settings → Deploy → Custom Start Command:** `node dist/worker.js`. It needs no domain, pre-deploy command or healthcheck.
-3. **Variables:** paste the same block as for `api`, except `PUBLIC_BASE_URL`, which the worker doesn't use. Tip: put the common variables under **Project Settings → Shared Variables** and reference them from both services.
-
-### 5. Deploy and verify
-
-Click **Deploy** (or push to the branch). Then:
-
-```bash
-export API=https://<your-api>.up.railway.app
-curl -s $API/health
-# The seeded keys are printed in the api service's deploy logs (pre-deploy step)
-curl -s $API/calls -X POST -H "Authorization: Bearer <client key>" \
-  -H 'Content-Type: application/json' -d '{"from":"+14155550100","to":"+14155550101"}'
-npx wscat -c '<ws_url from the response>'     # wss:// — Railway proxies WebSockets
-```
-
-A few details:
-- Railway's private network can be IPv6-only. The Redis clients are configured with `family: 0` so they resolve either.
-- Railway injects `PORT`, and the app honours it.
-- Redis must be version 7 or later, because the WebSocket token logic uses `EXPIRE … LT`. Check the version shown on the Redis service.
-- If the dashboard labels differ slightly from these steps, the Railway CLI (`railway up`, `railway variables`) can do the same things.
 
 ---
 
