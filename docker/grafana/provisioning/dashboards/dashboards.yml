@@ -1,0 +1,7 @@
+apiVersion: 1
+providers:
+  - name: mock-comms
+    folder: Mock Comms
+    type: file
+    options:
+      path: /var/lib/grafana/dashboards

@@ -1,0 +1,13 @@
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: mock-comms-api
+    metrics_path: /metrics/prometheus
+    # /metrics/prometheus requires an ADMIN key. This is the local dev seed key
+    # from docker-compose.yml — keep them in sync if you change it.
+    authorization:
+      type: Bearer
+      credentials: dev_admin_key_change_me
+    static_configs:
+      - targets: ['api:3000']

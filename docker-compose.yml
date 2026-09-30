@@ -1,0 +1,156 @@
+# Mock Communications Service — full local stack.
+#   docker compose up --build                          # api, worker, mysql, redis, minio
+#   docker compose --profile observability up --build  # + prometheus, grafana
+#
+# Every setting has a working default; override any of them in a `.env` file
+# next to this compose file (see .env.example), e.g. to use real AWS S3.
+
+x-app-env: &app-env
+  NODE_ENV: production
+  PORT: 3000
+  PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:3000}
+  DB_HOST: mysql
+  DB_PORT: 3306
+  DB_USER: ${MYSQL_USER:-comms}
+  DB_PASSWORD: ${MYSQL_PASSWORD:-comms}
+  DB_NAME: ${MYSQL_DATABASE:-comms}
+  REDIS_URL: redis://redis:6379
+  # Storage: MinIO by default. For AWS S3 set S3_ENDPOINT= and
+  # S3_PUBLIC_ENDPOINT= (empty), S3_FORCE_PATH_STYLE=false, plus bucket/region/keys.
+  S3_BUCKET: ${S3_BUCKET:-recordings}
+  S3_REGION: ${S3_REGION:-us-east-1}
+  S3_ENDPOINT: ${S3_ENDPOINT-http://minio:9000}
+  S3_PUBLIC_ENDPOINT: ${S3_PUBLIC_ENDPOINT-http://localhost:9000}
+  S3_FORCE_PATH_STYLE: ${S3_FORCE_PATH_STYLE:-true}
+  S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-minioadmin}
+  S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-minioadmin}
+  RATE_LIMIT_DEFAULT_MAX_CONCURRENT: ${RATE_LIMIT_DEFAULT_MAX_CONCURRENT:-3}
+  RATE_LIMIT_DEFAULT_MAX_CPS: ${RATE_LIMIT_DEFAULT_MAX_CPS:-2}
+  PERSISTENCE_FLUSH_INTERVAL_MS: ${PERSISTENCE_FLUSH_INTERVAL_MS:-5000}
+  # Fixed dev keys so the README examples work out of the box. CHANGE THESE
+  # (or leave them empty to generate random keys printed by `migrate`).
+  SEED_ADMIN_API_KEY: ${SEED_ADMIN_API_KEY-dev_admin_key_change_me}
+  SEED_CLIENT_API_KEY: ${SEED_CLIENT_API_KEY-dev_client_key_change_me}
+
+# api, worker and migrate share ONE image (built once, by `migrate`).
+x-app: &app
+  image: mock-comms-service:local
+  pull_policy: never
+  restart: unless-stopped
+  environment: *app-env
+
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-comms}
+      MYSQL_USER: ${MYSQL_USER:-comms}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-comms}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root}
+    ports:
+      - '${MYSQL_HOST_PORT:-3307}:3306'
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ['CMD-SHELL', 'mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent']
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  redis:
+    image: redis:7.4-alpine
+    # AOF persistence: live call state survives a Redis restart.
+    command: ['redis-server', '--appendonly', 'yes']
+    ports:
+      - '${REDIS_HOST_PORT:-6380}:6379'
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # MinIO (S3-compatible). The official minio/minio images are no longer
+  # publicly pullable, so this uses Bitnami's (legacy) MinIO build. It also
+  # creates the private recordings bucket on startup.
+  minio:
+    image: bitnamilegacy/minio:2025.5.24
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY_ID:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_ACCESS_KEY:-minioadmin}
+      MINIO_DEFAULT_BUCKETS: ${S3_BUCKET:-recordings}
+    ports:
+      - '9000:9000' # S3 API (signed recording URLs point here)
+      - '9001:9001' # web console
+    volumes:
+      - minio-data:/bitnami/minio/data
+    healthcheck:
+      test: ['CMD', 'curl', '-fs', 'http://localhost:9000/minio/health/live']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # One-shot: runs migrations and seeds the admin/client API keys.
+  migrate:
+    <<: *app
+    build: .
+    pull_policy: build
+    restart: 'no'
+    command: ['node', 'dist/infrastructure/database/scripts/bootstrap-db.js']
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+  api:
+    <<: *app
+    command: ['node', 'dist/main.js']
+    ports:
+      - '${API_HOST_PORT:-3000}:3000'
+    depends_on: &app-deps
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:3000/health || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  worker:
+    <<: *app
+    command: ['node', 'dist/worker.js']
+    depends_on: *app-deps
+
+  prometheus:
+    image: prom/prometheus:latest
+    profiles: ['observability']
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - '9090:9090'
+    depends_on:
+      - api
+
+  grafana:
+    image: grafana/grafana:latest
+    profiles: ['observability']
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: 'true'
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+    volumes:
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./docker/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - '3001:3000'
+    depends_on:
+      - prometheus
+
+volumes:
+  mysql-data:
+  redis-data:
+  minio-data:
